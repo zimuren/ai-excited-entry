@@ -1,74 +1,95 @@
-// Entry for make.fun "Make the AI judge excited" (ai-excited-01).
-// Decodes the bundled image and writes it to /output/entry.png.
-// Node 22, stdlib only, ESM, no dependencies, no network.
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+// make.fun entry — "Make the AI judge excited" (ai-excited-01).
+// Takes the base64 picture shipped next to this script, turns it back into
+// bytes, and drops the result at $MAKEFUN_OUTPUT_DIR/entry.png
+// (or /output/entry.png when the variable is unset).
+// Runs on Node 22+, standard library only, ESM, no dependencies, no network.
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const here = dirname(fileURLToPath(import.meta.url));
 
-function loadImageB64() {
-  const candidates = [join(__dirname, "image.b64"), join(process.cwd(), "image.b64")];
-  for (const p of candidates) {
+// The picture lives in image.b64, either beside this file or in the folder
+// the command was launched from; the first copy found wins.
+function fetchEncodedPicture() {
+  const places = [join(here, "image.b64"), join(process.cwd(), "image.b64")];
+  for (const place of places) {
     try {
-      return readFileSync(p, "utf8");
+      return readFileSync(place, "utf8");
     } catch {
-      // try next location
+      continue;
     }
   }
   throw new Error("image.b64 not found (looked in script dir and current dir)");
 }
 
-const b64 = loadImageB64().replace(/\s+/g, "");
-if (!b64) {
-  throw new Error("image.b64 is empty");
-}
-const bytes = Buffer.from(b64, "base64");
-if (
-  bytes.length < 4 ||
-  bytes[0] !== 0xff ||
-  bytes[1] !== 0xd8 ||
-  bytes[bytes.length - 2] !== 0xff ||
-  bytes[bytes.length - 1] !== 0xd9
-) {
-  throw new Error("decoded image.b64 is not a JPEG (must start with FF D8 and end with FF D9)");
+// Base64 may be wrapped across lines, so all whitespace comes out first.
+function decodePicture() {
+  const text = fetchEncodedPicture().replace(/\s+/g, "");
+  if (text.length === 0) {
+    throw new Error("image.b64 is empty");
+  }
+  return Buffer.from(text, "base64");
 }
 
-function jpegDimensions(buf) {
-  // Scan JPEG markers for a Start Of Frame (SOF0/SOF2) segment and read
-  // height then width (big-endian) after its length + precision bytes.
-  let pos = 2; // skip SOI (FF D8)
-  while (pos + 9 <= buf.length) {
-    if (buf[pos] !== 0xff) {
+// A JPEG always opens with FF D8 and closes with FF D9; anything else
+// means the bundled data is not a JPEG at all.
+function checkJpegBookends(buf) {
+  const ok =
+    buf.length >= 4 &&
+    buf[0] === 0xff &&
+    buf[1] === 0xd8 &&
+    buf[buf.length - 2] === 0xff &&
+    buf[buf.length - 1] === 0xd9;
+  if (!ok) {
+    throw new Error("decoded image.b64 is not a JPEG (must start with FF D8 and end with FF D9)");
+  }
+}
+
+// Markers with no payload of their own: TEM (0x01) and the RSTn / SOI / EOI
+// range. Everything else carries a 2-byte length field right after the code.
+function isPayloadFree(code) {
+  return code === 0x01 || (code >= 0xd0 && code <= 0xd9);
+}
+
+// Walk the marker stream past the SOI header until a Start Of Frame
+// segment (baseline SOF0 or progressive SOF2) shows up; its payload holds
+// one precision byte, then height, then width, all big-endian.
+function measureFrame(buf) {
+  let cursor = 2;
+  while (cursor + 9 <= buf.length) {
+    if (buf[cursor] !== 0xff) {
       throw new Error("malformed JPEG marker stream");
     }
-    // Skip any fill bytes (extra FF) before the marker code.
-    let marker = buf[pos + 1];
-    while (marker === 0xff) {
-      pos += 1;
-      marker = buf[pos + 1];
+    let code = buf[cursor + 1];
+    while (code === 0xff) {
+      cursor += 1;
+      code = buf[cursor + 1];
     }
-    // Standalone markers carry no length field.
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
-      pos += 2;
+    if (isPayloadFree(code)) {
+      cursor += 2;
       continue;
     }
-    const len = buf.readUInt16BE(pos + 2);
-    if (marker === 0xc0 || marker === 0xc2) {
-      // SOF segment: length (2), precision (1), height (2), width (2).
-      const height = buf.readUInt16BE(pos + 5);
-      const width = buf.readUInt16BE(pos + 7);
+    const segmentLen = buf.readUInt16BE(cursor + 2);
+    if (code === 0xc0 || code === 0xc2) {
+      const height = buf.readUInt16BE(cursor + 5);
+      const width = buf.readUInt16BE(cursor + 7);
+      if (width === 0 || height === 0) {
+        throw new Error(`JPEG frame has invalid dimensions ${width}x${height} (both must be positive)`);
+      }
       return { width, height };
     }
-    pos += 2 + len;
+    cursor += 2 + segmentLen;
   }
   throw new Error("no SOF0/SOF2 marker found in JPEG");
 }
 
-const dims = jpegDimensions(bytes);
+const picture = decodePicture();
+checkJpegBookends(picture);
+const size = measureFrame(picture);
 
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
 mkdirSync(outDir, { recursive: true });
 const outPath = join(outDir, "entry.png");
-writeFileSync(outPath, bytes);
-console.log(`wrote ${outPath} (${bytes.length} bytes, ${dims.width}x${dims.height})`);
+writeFileSync(outPath, picture);
+console.log(`wrote ${outPath} (${picture.length} bytes, ${size.width}x${size.height})`);
