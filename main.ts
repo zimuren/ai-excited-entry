@@ -15,7 +15,20 @@ function readBase64() {
   throw new Error("image.b64 not found next to main.ts or in the working directory");
 }
 
-const bytes = Buffer.from(readBase64().trim(), "base64");
+const b64 = readBase64().trim();
+if (!b64) {
+  throw new Error("image.b64 is empty");
+}
+const bytes = Buffer.from(b64, "base64");
+if (
+  bytes.length < 4 ||
+  bytes[0] !== 0xff ||
+  bytes[1] !== 0xd8 ||
+  bytes[bytes.length - 2] !== 0xff ||
+  bytes[bytes.length - 1] !== 0xd9
+) {
+  throw new Error("decoded image.b64 is not a JPEG (must start with FF D8 and end with FF D9)");
+}
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
 mkdirSync(outDir, { recursive: true });
 const outPath = join(outDir, "entry.png");
